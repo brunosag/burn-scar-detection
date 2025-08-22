@@ -1,0 +1,7 @@
+[project]
+name = "burn-scar"
+version = "0.1.0"
+description = "Burn scar detection from Sentinel-2 imagery using dNBR and Machine Learning."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["matplotlib>=3.10.5", "numpy>=2.3.2", "rasterio>=1.4.3"]
