@@ -1,7 +1,23 @@
 [project]
-name = "burn-scar"
+name = "burn-scar-detection"
 version = "0.1.0"
-description = "Burn scar detection from Sentinel-2 imagery using dNBR and Machine Learning."
+description = "A Python tool for detecting wildfire burn scars from Sentinel-2 imagery, combining dNBR and Random Forest."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["matplotlib>=3.10.5", "numpy>=2.3.2", "rasterio>=1.4.3"]
+dependencies = [
+    "matplotlib>=3.10.5",
+    "numpy>=2.3.2",
+    "pyqt6>=6.9.1",
+    "rasterio>=1.4.3",
+    "scikit-learn>=1.7.1",
+]
+
+[project.scripts]
+burn-scar = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["main.py"]

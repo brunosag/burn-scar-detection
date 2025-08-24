@@ -1,6 +1,10 @@
 # Python
 __pycache__/
 .venv/
+.ruff_cache/
 
 # Data
 bands/
+
+# Models
+*.joblib
