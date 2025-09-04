@@ -2,10 +2,13 @@ import os
 
 import numpy as np
 import rasterio
+import spyndex
 import torch
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
+
+from . import config
 
 
 class JointTransform:
@@ -67,24 +70,39 @@ class JointTransform:
 
 
 class BurnScarDataset(Dataset):
-    def __init__(self, t1_dir, t2_dir, mask_dir, augmentations=None):
+    def __init__(
+        self, t1_dir, t2_dir, glcm_t1_dir, glcm_t2_dir, mask_dir, augmentations=None
+    ):
         self.t1_dir = t1_dir
         self.t2_dir = t2_dir
+        self.glcm_t1_dir = glcm_t1_dir
+        self.glcm_t2_dir = glcm_t2_dir
         self.mask_dir = mask_dir
         self.augmentations = augmentations
         self.ids = sorted(
-            [f.split('_')[-1].replace('.npy', '') for f in os.listdir(t1_dir)]
+            [f.split('_')[-1].replace('.tif', '') for f in os.listdir(t1_dir)]
         )
 
     def __len__(self):
         return len(self.ids)
 
+    def _compute_spectral_features(self, raw_patch):
+        """Computes NBR and NBRSWIR on-the-fly."""
+        params = {
+            'N': raw_patch[config.B_NIR],
+            'R': raw_patch[config.B_RED],
+            'S1': raw_patch[config.B_SWIR1],
+            'S2': raw_patch[config.B_SWIR2],
+        }
+        indices = spyndex.computeIndex(index=['NBR', 'NBRSWIR'], params=params)
+        indices = np.nan_to_num(np.array(indices), nan=0.0)  # Handle potential NaNs
+        return indices.astype(np.float32)
+
     def _normalize_patch(self, patch):
+        """Applies per-channel percentile clipping and standardization."""
         normalized_patch = np.zeros_like(patch, dtype=np.float32)
         for i in range(patch.shape[0]):
             channel = patch[i, :, :]
-            if np.any(~np.isfinite(channel)):
-                channel = np.nan_to_num(channel, nan=0.0)
             p1, p99 = np.percentile(channel, [1, 99])
             clipped_channel = np.clip(channel, p1, p99)
             mean, std = clipped_channel.mean(), clipped_channel.std()
@@ -93,22 +111,41 @@ class BurnScarDataset(Dataset):
 
     def __getitem__(self, idx):
         id_ = self.ids[idx]
+        fname_tif = f'recorte_{id_}.tif'
+        fname_npy = f'recorte_{id_}.npy'
 
-        t1_full = np.load(os.path.join(self.t1_dir, f'recorte_{id_}.npy'))
-        t2_full = np.load(os.path.join(self.t2_dir, f'recorte_{id_}.npy'))
+        # 1. Load raw data and pre-computed GLCM
+        with rasterio.open(os.path.join(self.t1_dir, fname_tif)) as src:
+            t1_raw = src.read().astype(np.float32)
+        with rasterio.open(os.path.join(self.t2_dir, fname_tif)) as src:
+            t2_raw = src.read().astype(np.float32)
 
-        with rasterio.open(os.path.join(self.mask_dir, f'recorte_{id_}.tif')) as src:
+        t1_glcm = np.load(os.path.join(self.glcm_t1_dir, fname_npy))
+        t2_glcm = np.load(os.path.join(self.glcm_t2_dir, fname_npy))
+
+        # 2. Compute spectral features on-the-fly
+        t1_spectral = self._compute_spectral_features(t1_raw)
+        t2_spectral = self._compute_spectral_features(t2_raw)
+
+        # 3. Stack features for each timestamp independently (NO DATA LEAKAGE)
+        t1_full = np.vstack((t1_raw, t1_spectral, t1_glcm))
+        t2_full = np.vstack((t2_raw, t2_spectral, t2_glcm))
+
+        # 4. Load mask
+        with rasterio.open(os.path.join(self.mask_dir, fname_tif)) as src:
             mask = src.read(1)
-
         mask = np.where(mask > 0, 1.0, 0.0).astype(np.float32)
 
+        # 5. Normalize full feature stacks
         t1_norm = self._normalize_patch(t1_full)
         t2_norm = self._normalize_patch(t2_full)
 
+        # 6. Convert to tensors
         t1 = torch.from_numpy(t1_norm).float()
         t2 = torch.from_numpy(t2_norm).float()
         y = torch.from_numpy(mask).float().unsqueeze(0)
 
+        # 7. Apply augmentations
         if self.augmentations:
             t1, t2, y = self.augmentations(t1, t2, y)
 

@@ -15,9 +15,12 @@ def main():
 
     # 1. Setup Augmentations and Datasets
     augmentations = JointTransform(p_flip=0.5, p_photometric=0.2)
+
     full_dataset = BurnScarDataset(
         t1_dir=config.T1_DIR,
         t2_dir=config.T2_DIR,
+        glcm_t1_dir=config.GLCM_T1_DIR,
+        glcm_t2_dir=config.GLCM_T2_DIR,
         mask_dir=config.MASK_DIR,
         augmentations=augmentations,
     )
@@ -29,11 +32,16 @@ def main():
         full_dataset, [train_size, val_size], generator
     )
 
+    val_dataset_no_aug_instance = BurnScarDataset(
+        t1_dir=config.T1_DIR,
+        t2_dir=config.T2_DIR,
+        glcm_t1_dir=config.GLCM_T1_DIR,
+        glcm_t2_dir=config.GLCM_T2_DIR,
+        mask_dir=config.MASK_DIR,
+        augmentations=None,
+    )
     val_dataset = torch.utils.data.Subset(
-        BurnScarDataset(
-            config.T1_DIR, config.T2_DIR, config.MASK_DIR, augmentations=None
-        ),
-        val_dataset_aug.indices,
+        val_dataset_no_aug_instance, val_dataset_aug.indices
     )
 
     # 2. Create DataLoaders
@@ -42,12 +50,14 @@ def main():
         batch_size=config.BATCH_SIZE,
         shuffle=True,
         num_workers=os.cpu_count(),
+        pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
         num_workers=os.cpu_count(),
+        pin_memory=True,
     )
 
     print(f'Total samples: {len(full_dataset)}')
