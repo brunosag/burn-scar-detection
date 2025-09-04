@@ -1,10 +1,6 @@
-# Python
-__pycache__/
+data/
 .venv/
-.ruff_cache/
-
-# Data
-bands/
-
-# Models
-*.joblib
+models/
+.ctxignore
+__pycache__/
+*.egg-info
