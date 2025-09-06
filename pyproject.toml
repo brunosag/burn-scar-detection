@@ -20,4 +20,5 @@ dependencies = [
     "segmentation_models_pytorch",
     "scikit-learn",
     "torchmetrics",
+    "scikit-image",
 ]
