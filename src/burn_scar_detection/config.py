@@ -15,10 +15,10 @@ GLCM_T2_DIR = os.path.join(PROCESSED_DATA_DIR, 'glcm_t2')
 
 
 # --- Training Configuration ---
-BATCH_SIZE = 8
+BATCH_SIZE = 24
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LEARNING_RATE = 1e-4
-EPOCHS = 32
+EPOCHS = 100
 MODEL_PATH = 'models/cbam_unet_best.pth'
 
 # --- Band Indices ---

@@ -1,23 +1,23 @@
-[project]
-name = "burn-scar-detection"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "ipywidgets>=8.1.7",
-    "jupyter>=1.1.1",
-    "matplotlib>=3.10.6",
-    "rasterio>=1.4.3",
-    "scikit-image>=0.25.2",
-    "scikit-learn>=1.7.1",
-    "segmentation-models-pytorch>=0.5.0",
-    "spyndex>=0.7.1",
-    "torch>=2.8.0",
-    "torchmetrics>=1.8.2",
-    "torchvision>=0.23.0",
-]
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "burn-scar-detection"
+version = "0.1.0"
+authors = [
+    { name = "Bruno Samuel Ardenghi Gonçalves", email = "bruno.samuel@ufrgs.br" },
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch",
+    "numpy",
+    "rasterio",
+    "spyndex",
+    "torchvision",
+    "segmentation_models_pytorch",
+    "scikit-learn",
+    "torchmetrics",
+]
