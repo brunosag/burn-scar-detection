@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, random_split
 
 from burn_scar_detection import config
@@ -64,7 +65,7 @@ def main():
     print(f'Training samples: {len(train_dataset)}')
     print(f'Validation samples: {len(val_dataset)}')
 
-    # 3. Initialize Model, Optimizer
+    # 3. Initialize Model, Optimizer, and Scheduler
     model = SiameseAttentionUNet(
         encoder_name=config.ENCODER_NAME,
         encoder_weights=config.ENCODER_WEIGHTS,
@@ -73,9 +74,11 @@ def main():
     ).to(config.DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
 
-    # 4. Training Loop
+    # 4. Training Loop Setup for Early Stopping
     best_val_iou = -1.0
+    epochs_no_improve = 0
     os.makedirs(os.path.dirname(config.MODEL_PATH), exist_ok=True)
 
     for epoch in range(1, config.EPOCHS + 1):
@@ -88,10 +91,24 @@ def main():
             f'Val Loss: {val_loss:.4f} | Val F1: {val_f1:.4f} | Val IoU: {val_iou:.4f} | Val AUC: {val_auc:.4f}'
         )
 
-        if val_iou > best_val_iou:
+        scheduler.step(val_loss)
+
+        improvement_delta = val_iou - best_val_iou
+
+        if improvement_delta > config.EARLY_STOPPING_MIN_DELTA:
+            print(f'Validation IoU improved from {best_val_iou:.4f} to {val_iou:.4f}')
             best_val_iou = val_iou
+            epochs_no_improve = 0
             torch.save(model.state_dict(), config.MODEL_PATH)
             print(f'✅ New best model saved with IoU: {best_val_iou:.4f}')
+        else:
+            epochs_no_improve += 1
+            print(f'No significant improvement for {epochs_no_improve} epoch(s).')
+
+        if epochs_no_improve >= config.EARLY_STOPPING_PATIENCE:
+            print(f'\nEarly stopping triggered after {epoch} epochs.')
+            print(f'Best validation IoU achieved: {best_val_iou:.4f}')
+            break
 
 
 if __name__ == '__main__':
