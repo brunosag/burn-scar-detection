@@ -4,11 +4,13 @@ import numpy as np
 import rasterio
 import spyndex
 from skimage.feature import graycomatrix, graycoprops
-from skimage.util.shape import view_as_windows
+
+# from skimage.util.shape import view_as_windows # No longer required for global GLCM
 from tqdm import tqdm
 
 from burn_scar_detection import config
 
+# --- Configuration ---
 RAW_DATA_DIR = config.RAW_DATA_DIR
 PROCESSED_DATA_DIR = 'data/processed'
 
@@ -20,6 +22,8 @@ B_RED = config.B_RED
 B_NIR = config.B_NIR
 B_SWIR1 = config.B_SWIR1
 B_SWIR2 = config.B_SWIR2
+
+# --- Feature Calculation Functions ---
 
 
 def _compute_spectral_features(raw_patch):
@@ -40,15 +44,17 @@ def _compute_spectral_features(raw_patch):
 
 def _compute_glcm_features(
     patch,
-    window_size=8,
-    step=8,
     distances=[1],
     angles=[0],
     properties=['contrast', 'homogeneity', 'correlation'],
 ):
-    """Computes GLCM features for the NIR band of a given patch."""
+    """
+    Computes global GLCM features for the NIR band of a given patch.
+    This replaces the slow, windowed calculation.
+    """
     nir_band = patch[B_NIR, :, :]
 
+    # 1. Normalize NIR band to 0-255 range for GLCM calculation
     nir_min, nir_max = nir_band.min(), nir_band.max()
     if nir_max - nir_min > 1e-6:
         nir_band_uint8 = ((nir_band - nir_min) / (nir_max - nir_min) * 255).astype(
@@ -57,33 +63,31 @@ def _compute_glcm_features(
     else:
         nir_band_uint8 = np.zeros_like(nir_band, dtype=np.uint8)
 
-    windows = view_as_windows(nir_band_uint8, (window_size, window_size), step=step)
-    h_windows, w_windows, _, _ = windows.shape
-    glcm_features = np.zeros((len(properties), h_windows, w_windows), dtype=np.float32)
+    # 2. Calculate GLCM once for the entire patch (global approach)
+    glcm = graycomatrix(
+        nir_band_uint8,
+        distances=distances,
+        angles=angles,
+        levels=256,
+        symmetric=True,
+        normed=True,
+    )
 
-    for r in range(h_windows):
-        for c in range(w_windows):
-            window = windows[r, c, :, :]
-            glcm = graycomatrix(
-                window,
-                distances=distances,
-                angles=angles,
-                levels=256,
-                symmetric=True,
-                normed=True,
-            )
-            for i, prop in enumerate(properties):
-                glcm_features[i, r, c] = graycoprops(glcm, prop)[0, 0]
+    # 3. Extract properties from the global GLCM
+    glcm_features_vector = []
+    for prop in properties:
+        glcm_features_vector.append(graycoprops(glcm, prop)[0, 0])
 
+    glcm_features_vector = np.array(glcm_features_vector, dtype=np.float32)
+
+    # 4. Broadcast the global features across the spatial dimensions of the patch
     h_patch, w_patch = patch.shape[1:]
-    full_size_features = np.zeros((len(properties), h_patch, w_patch), dtype=np.float32)
-    for r in range(h_windows):
-        for c in range(w_windows):
-            full_size_features[
-                :, r * step : r * step + window_size, c * step : c * step + window_size
-            ] = glcm_features[:, r, c, np.newaxis, np.newaxis]
+    glcm_features_broadcasted = np.broadcast_to(
+        glcm_features_vector[:, np.newaxis, np.newaxis],
+        (len(properties), h_patch, w_patch),
+    )
 
-    return full_size_features
+    return glcm_features_broadcasted
 
 
 def _normalize_stack(patch_stack):
@@ -96,6 +100,9 @@ def _normalize_stack(patch_stack):
         mean, std = clipped_channel.mean(), clipped_channel.std()
         normalized_stack[i, :, :] = (clipped_channel - mean) / (std + 1e-8)
     return normalized_stack
+
+
+# --- Main Processing Loop ---
 
 
 def process_and_save_features():
@@ -122,11 +129,11 @@ def process_and_save_features():
                 raw_patch = src.read().astype(np.float32)
 
             spectral_feats = _compute_spectral_features(raw_patch)
+            # Call the updated (global) GLCM function
             glcm_feats = _compute_glcm_features(raw_patch)
 
             full_feature_stack = np.vstack((raw_patch, spectral_feats, glcm_feats))
             normalized_stack = _normalize_stack(full_feature_stack)
-
             np.save(os.path.join(out_dir, fname_npy), normalized_stack)
 
     print('\nProcessing masks...')
@@ -141,8 +148,6 @@ def process_and_save_features():
         np.save(os.path.join(MASK_PROC_DIR, fname_npy), mask_binary)
 
     print('\nPre-processing complete.')
-    print(f'Processed features saved to: {T1_FEATURES_DIR} and {T2_FEATURES_DIR}')
-    print(f'Processed masks saved to: {MASK_PROC_DIR}')
 
 
 if __name__ == '__main__':
