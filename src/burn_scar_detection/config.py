@@ -12,6 +12,8 @@ PROCESSED_FEATURES_T1_DIR = os.path.join(PROCESSED_DATA_DIR, 'features_t1')
 PROCESSED_FEATURES_T2_DIR = os.path.join(PROCESSED_DATA_DIR, 'features_t2')
 PROCESSED_MASK_DIR = os.path.join(PROCESSED_DATA_DIR, 'mask')
 
+TEST_RAW_DATA_DIR = 'data/avaliacao'
+
 MODEL_CHECKPOINT_DIR = 'models/'
 
 B_RED = 0

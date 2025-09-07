@@ -5,3 +5,5 @@ models/
 __pycache__/
 *.egg-info
 .ruff_cache
+output/
+submission.csv

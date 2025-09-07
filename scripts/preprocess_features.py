@@ -9,13 +9,15 @@ from tqdm import tqdm
 
 from burn_scar_detection import config
 
-RAW_DATA_DIR = config.RAW_DATA_DIR
-PROCESSED_DATA_DIR = 'data/processed'
-SPLIT_FILE = os.path.join(PROCESSED_DATA_DIR, 'splits.json')
+RAW_T1_DIR = config.RAW_T1_DIR
+RAW_T2_DIR = config.RAW_T2_DIR
+RAW_MASK_DIR = config.RAW_MASK_DIR
 
-T1_FEATURES_DIR = os.path.join(PROCESSED_DATA_DIR, 'features_t1')
-T2_FEATURES_DIR = os.path.join(PROCESSED_DATA_DIR, 'features_t2')
-MASK_PROC_DIR = os.path.join(PROCESSED_DATA_DIR, 'mask')
+PROCESSED_DATA_DIR = config.PROCESSED_DATA_DIR
+SPLIT_FILE = os.path.join(PROCESSED_DATA_DIR, 'splits.json')
+STATS_FILE = os.path.join(PROCESSED_DATA_DIR, 'global_stats.npz')
+
+TEST_RAW_DATA_DIR = config.TEST_RAW_DATA_DIR
 
 B_RED = config.B_RED
 B_NIR = config.B_NIR
@@ -24,7 +26,7 @@ B_SWIR2 = config.B_SWIR2
 
 
 def _compute_spectral_features(raw_patch):
-    """Computes NBR and NBRSWIR."""
+    """Computes spectral indices used in training."""
     params = {
         'N': raw_patch[B_NIR],
         'R': raw_patch[B_RED],
@@ -70,9 +72,9 @@ def _compute_glcm_features(
     return glcm_features_broadcasted
 
 
-def _get_feature_stack(patch_id, time_step, in_dir):
+def _get_feature_stack(patch_id, time_step, raw_data_dir):
     """Helper function to load raw data and compute features before normalization."""
-    raw_path = os.path.join(in_dir, f'{patch_id}.tif')
+    raw_path = os.path.join(raw_data_dir, f'{patch_id}.tif')
     with rasterio.open(raw_path) as src:
         raw_patch = src.read().astype(np.float32)
 
@@ -82,16 +84,15 @@ def _get_feature_stack(patch_id, time_step, in_dir):
     return full_feature_stack
 
 
-def calculate_global_statistics(train_ids):
+def calculate_and_save_statistics(train_ids):
     """Calculates normalization statistics based *only* on the training set."""
     print(f'Calculating global statistics from {len(train_ids)} training samples...')
     all_t1_data = []
     all_t2_data = []
 
     for id_ in tqdm(train_ids, desc='Loading training data for stats'):
-        t1_stack = _get_feature_stack(id_, 't1', config.RAW_T1_DIR)
-        t2_stack = _get_feature_stack(id_, 't2', config.RAW_T2_DIR)
-
+        t1_stack = _get_feature_stack(id_, 't1', RAW_T1_DIR)
+        t2_stack = _get_feature_stack(id_, 't2', RAW_T2_DIR)
         all_t1_data.append(t1_stack.reshape(t1_stack.shape[0], -1))
         all_t2_data.append(t2_stack.reshape(t2_stack.shape[0], -1))
 
@@ -102,18 +103,16 @@ def calculate_global_statistics(train_ids):
     for full_data, time_key in [(t1_full, 't1'), (t2_full, 't2')]:
         p1 = np.percentile(full_data, 1, axis=1)
         p99 = np.percentile(full_data, 99, axis=1)
-
         clipped_data = np.clip(full_data, p1[:, np.newaxis], p99[:, np.newaxis])
-
         mean = np.mean(clipped_data, axis=1)
         std = np.std(clipped_data, axis=1)
-
         stats[time_key]['p1'] = p1
         stats[time_key]['p99'] = p99
         stats[time_key]['mean'] = mean
         stats[time_key]['std'] = std
 
-    print('Global statistics calculation complete.')
+    np.savez_compressed(STATS_FILE, t1=stats['t1'], t2=stats['t2'])
+    print(f'Global statistics saved to {STATS_FILE}')
     return stats
 
 
@@ -127,54 +126,93 @@ def apply_global_normalization(patch_stack, stats):
         p99 = stats['p99'][i]
         mean = stats['mean'][i]
         std = stats['std'][i]
-
         clipped_channel = np.clip(patch_stack[i, :, :], p1, p99)
         normalized_stack[i, :, :] = (clipped_channel - mean) / (std + 1e-8)
-
     return normalized_stack
 
 
-def process_and_save_features(global_stats, all_ids):
-    """Processes all images using the calculated global statistics."""
-    os.makedirs(T1_FEATURES_DIR, exist_ok=True)
-    os.makedirs(T2_FEATURES_DIR, exist_ok=True)
-    os.makedirs(MASK_PROC_DIR, exist_ok=True)
+def process_split_data(ids, global_stats, raw_dirs, output_dirs, process_mask=True):
+    """Processes features and masks for a given set of file IDs."""
+    os.makedirs(output_dirs['t1'], exist_ok=True)
+    os.makedirs(output_dirs['t2'], exist_ok=True)
+    if process_mask:
+        os.makedirs(output_dirs['mask'], exist_ok=True)
 
-    for time_step, in_dir, out_dir in [
-        ('t1', config.RAW_T1_DIR, T1_FEATURES_DIR),
-        ('t2', config.RAW_T2_DIR, T2_FEATURES_DIR),
-    ]:
+    for time_step, in_dir_key, out_dir_key in [('t1', 't1', 't1'), ('t2', 't2', 't2')]:
         print(f'\nProcessing timeframe: {time_step}')
         time_specific_stats = global_stats[time_step]
 
-        for id_ in tqdm(all_ids, desc=f'Applying normalization for {time_step}'):
-            feature_stack = _get_feature_stack(id_, time_step, in_dir)
-
+        for id_ in tqdm(ids, desc=f'Applying normalization for {time_step}'):
+            feature_stack = _get_feature_stack(id_, time_step, raw_dirs[in_dir_key])
             normalized_stack = apply_global_normalization(
                 feature_stack, time_specific_stats
             )
+            np.save(
+                os.path.join(output_dirs[out_dir_key], f'{id_}.npy'), normalized_stack
+            )
 
-            np.save(os.path.join(out_dir, f'{id_}.npy'), normalized_stack)
-
-    print('\nProcessing masks...')
-    for id_ in tqdm(all_ids, desc='Processing masks'):
-        mask_path = os.path.join(config.RAW_MASK_DIR, f'{id_}.tif')
-        with rasterio.open(mask_path) as src:
-            mask = src.read(1)
-        mask_binary = np.where(mask > 0, 1.0, 0.0).astype(np.float32)
-        np.save(os.path.join(MASK_PROC_DIR, f'{id_}.npy'), mask_binary)
+    if process_mask:
+        print('\nProcessing masks...')
+        for id_ in tqdm(ids, desc='Processing masks'):
+            mask_path = os.path.join(raw_dirs['mask'], f'{id_}.tif')
+            with rasterio.open(mask_path) as src:
+                mask = src.read(1)
+            mask_binary = np.where(mask > 0, 1.0, 0.0).astype(np.float32)
+            np.save(os.path.join(output_dirs['mask'], f'{id_}.npy'), mask_binary)
 
 
 def main():
+    print('--- Processing Training and Validation Data ---')
     with open(SPLIT_FILE, 'r') as f:
         splits = json.load(f)
     train_ids = splits['train']
-    all_ids = splits['train'] + splits['validation']
+    val_ids = splits['validation']
 
-    global_stats = calculate_global_statistics(train_ids)
+    stats = calculate_and_save_statistics(train_ids)
 
-    process_and_save_features(global_stats, all_ids)
-    print('\nPre-processing complete.')
+    train_val_raw_dirs = {'t1': RAW_T1_DIR, 't2': RAW_T2_DIR, 'mask': RAW_MASK_DIR}
+    train_val_output_dirs = {
+        't1': config.PROCESSED_FEATURES_T1_DIR,
+        't2': config.PROCESSED_FEATURES_T2_DIR,
+        'mask': config.PROCESSED_MASK_DIR,
+    }
+    process_split_data(
+        train_ids + val_ids,
+        stats,
+        train_val_raw_dirs,
+        train_val_output_dirs,
+        process_mask=True,
+    )
+
+    print('\n--- Processing Test Data ---')
+    test_raw_t1_dir = os.path.join(TEST_RAW_DATA_DIR, 't1')
+    if not os.path.exists(test_raw_t1_dir):
+        print(f'Error: Test directory not found at {test_raw_t1_dir}')
+        print('Skipping test data processing.')
+        return
+
+    test_ids = sorted(
+        [
+            f.replace('.tif', '')
+            for f in os.listdir(test_raw_t1_dir)
+            if f.endswith('.tif')
+        ]
+    )
+
+    test_raw_dirs = {
+        't1': os.path.join(TEST_RAW_DATA_DIR, 't1'),
+        't2': os.path.join(TEST_RAW_DATA_DIR, 't2'),
+    }
+    test_output_dirs = {
+        't1': os.path.join(PROCESSED_DATA_DIR, 'test_features_t1'),
+        't2': os.path.join(PROCESSED_DATA_DIR, 'test_features_t2'),
+    }
+
+    process_split_data(
+        test_ids, stats, test_raw_dirs, test_output_dirs, process_mask=False
+    )
+
+    print('\nFull preprocessing complete for train, validation, and test sets.')
 
 
 if __name__ == '__main__':
