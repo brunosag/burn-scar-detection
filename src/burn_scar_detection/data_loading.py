@@ -53,7 +53,6 @@ class JointTransform:
                 .uniform_(max(0, 1 - self.contrast), 1 + self.contrast)
                 .item()
             )
-            # Apply only to the first 4 raw bands.
             for i in range(4):
                 t1[i] = TF.adjust_contrast(
                     TF.adjust_brightness(t1[i].unsqueeze(0), brightness_factor),
@@ -67,18 +66,30 @@ class JointTransform:
 
 
 class BurnScarDataset(Dataset):
-    def __init__(self, t1_feature_dir, t2_feature_dir, mask_dir, augmentations=None):
+    def __init__(
+        self,
+        t1_feature_dir,
+        t2_feature_dir,
+        mask_dir,
+        file_ids=None,
+        augmentations=None,
+    ):
         self.t1_dir = t1_feature_dir
         self.t2_dir = t2_feature_dir
         self.mask_dir = mask_dir
         self.augmentations = augmentations
-        self.ids = sorted(
-            [
-                f.replace('.npy', '')
-                for f in os.listdir(t1_feature_dir)
-                if f.endswith('.npy')
-            ]
-        )
+
+        if file_ids:
+            self.ids = file_ids
+        else:
+            print('Warning: No file_ids provided. Loading all files from directory.')
+            self.ids = sorted(
+                [
+                    f.replace('.npy', '')
+                    for f in os.listdir(t1_feature_dir)
+                    if f.endswith('.npy')
+                ]
+            )
 
     def __len__(self):
         return len(self.ids)
@@ -87,17 +98,14 @@ class BurnScarDataset(Dataset):
         id_ = self.ids[idx]
         fname_npy = f'{id_}.npy'
 
-        # 1. Load pre-processed feature stacks directly
         t1_full_norm = np.load(os.path.join(self.t1_dir, fname_npy))
         t2_full_norm = np.load(os.path.join(self.t2_dir, fname_npy))
         mask = np.load(os.path.join(self.mask_dir, fname_npy))
 
-        # 2. Convert to tensors
         t1 = torch.from_numpy(t1_full_norm).float()
         t2 = torch.from_numpy(t2_full_norm).float()
         y = torch.from_numpy(mask).float().unsqueeze(0)
 
-        # 3. Apply runtime augmentations
         if self.augmentations:
             t1, t2, y = self.augmentations(t1, t2, y)
 

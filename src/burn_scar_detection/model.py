@@ -68,8 +68,9 @@ class FusionBlock(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, f1, f2):
-        fused = torch.cat([f1, f2, torch.abs(f1 - f2)], dim=1)
+    def forward(self, f1, f2, attended_difference):
+        """Combines f1, f2, and the attended difference feature."""
+        fused = torch.cat([f1, f2, attended_difference], dim=1)
         return self.fusion_conv(fused)
 
 
@@ -96,15 +97,15 @@ class SiameseAttentionUNet(nn.Module):
         f1_features = self.encoder(t1)
         f2_features = self.encoder(t2)
 
-        f1_attended = [cbam(f) for cbam, f in zip(self.cbam_blocks, f1_features)]
-        f2_attended = [cbam(f) for cbam, f in zip(self.cbam_blocks, f2_features)]
+        fused_skip_features = []
+        for f1, f2, cbam, fusion_block in zip(
+            f1_features, f2_features, self.cbam_blocks, self.fusion_blocks
+        ):
+            difference = torch.abs(f1 - f2)
+            attended_difference = cbam(difference)
+            fused_output = fusion_block(f1, f2, attended_difference)
 
-        fused_skip_features = [
-            fusion_block(f1, f2)
-            for fusion_block, f1, f2 in zip(
-                self.fusion_blocks, f1_attended, f2_attended
-            )
-        ]
+            fused_skip_features.append(fused_output)
 
         decoder_output = self.decoder(fused_skip_features)
         masks = self.segmentation_head(decoder_output)
