@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 
 def train_one_epoch(
-    model, loader, optimizer, device, scheduler, loss_fn, pos_weight, grad_clip_norm=1.0
+    model, loader, optimizer, device, scheduler, loss_fn, grad_clip_norm=1.0
 ):
     """
     - Uses a flexible loss function (loss_fn).
@@ -22,7 +22,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         predictions_logits = model(t1, t2)
-        loss = loss_fn(predictions_logits, mask, pos_weight)
+        loss = loss_fn(predictions_logits, mask)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -37,7 +37,7 @@ def train_one_epoch(
     return total_loss / len(loader)
 
 
-def evaluate(model, loader, device, loss_fn, pos_weight):
+def evaluate(model, loader, device, loss_fn):
     """Evaluation epoch to use the flexible loss function."""
     model.eval()
     total_loss = 0
@@ -50,7 +50,7 @@ def evaluate(model, loader, device, loss_fn, pos_weight):
             t1, t2, mask = t1.to(device), t2.to(device), mask.to(device)
             predictions_logits = model(t1, t2)
 
-            loss = loss_fn(predictions_logits, mask, pos_weight)
+            loss = loss_fn(predictions_logits, mask)
             total_loss += loss.item()
 
             predictions_probs = torch.sigmoid(predictions_logits)

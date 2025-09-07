@@ -1,4 +1,5 @@
 import argparse
+import functools
 import json
 import os
 
@@ -6,11 +7,12 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from burn_scar_detection import config as common_config
-from burn_scar_detection import losses
+from burn_scar_detection import losses as loss_module
 from burn_scar_detection.data_loading import BurnScarDataset, JointTransform
 from burn_scar_detection.engine import evaluate, train_one_epoch
 from burn_scar_detection.models import get_model
@@ -24,9 +26,7 @@ def compute_pos_weight(mask_dir, file_ids):
     for id_ in tqdm(file_ids, desc='Analyzing mask imbalance'):
         mask_path = os.path.join(mask_dir, f'{id_}.npy')
         if not os.path.exists(mask_path):
-            print(f'Warning: Mask file not found {mask_path}, skipping.')
             continue
-
         try:
             m = np.load(mask_path)
             pos_pixels += (m > 0.5).sum()
@@ -40,14 +40,14 @@ def compute_pos_weight(mask_dir, file_ids):
         )
         return torch.tensor(1.0, device=common_config.DEVICE)
 
-    weight = float(neg_pixels / pos_pixels)
+    weight = float(neg_pixels / max(1, pos_pixels))
     print(f'Negative/Positive pixel ratio (pos_weight): {weight:.2f}')
     return torch.tensor([weight], device=common_config.DEVICE)
 
 
 LOSS_FUNCTION_REGISTRY = {
-    'bce_lovasz': losses.bce_lovasz_loss,
-    'bce_dice': losses.bce_dice_loss,
+    'bce_lovasz': loss_module.bce_lovasz_loss,
+    'bce_dice': loss_module.bce_dice_loss,
 }
 
 
@@ -67,29 +67,20 @@ def parse_args():
         type=str,
         default='bce_lovasz',
         choices=LOSS_FUNCTION_REGISTRY.keys(),
-        help='Loss function to use. Recommended: bce_lovasz.',
+        help='Loss function for final stage or single-stage training.',
     )
     parser.add_argument(
         '--metric',
         type=str,
         default='val_f1',
         choices=['val_loss', 'val_f1', 'val_auc', 'val_iou'],
-        help='Metric to monitor for early stopping. Recommended: val_f1 or val_iou.',
+        help='Metric to monitor for early stopping.',
     )
     parser.add_argument(
-        '--epochs',
-        type=int,
-        default=100,
-        help='Maximum number of training epochs',
+        '--epochs', type=int, default=150, help='Maximum number of training epochs'
     )
     parser.add_argument(
-        '--batch_size', type=int, default=24, help='Training batch size'
-    )
-    parser.add_argument(
-        '--lr',
-        type=float,
-        default=1e-3,
-        help='Initial learning rate (max_lr for OneCycleLR)',
+        '--batch_size', type=int, default=36, help='Training batch size'
     )
     parser.add_argument(
         '--weight_decay', type=float, default=1e-2, help='AdamW weight decay parameter.'
@@ -97,26 +88,40 @@ def parse_args():
     parser.add_argument(
         '--early_stopping_patience',
         type=int,
-        default=20,
-        help='Patience for early stopping (epochs without improvement)',
+        default=15,
+        help='Patience for early stopping/stage transition.',
     )
     parser.add_argument(
         '--early_stopping_delta',
         type=float,
         default=0.001,
-        help='Minimum improvement in monitored metric to reset patience',
+        help='Minimum improvement in monitored metric to reset patience.',
     )
+    parser.add_argument(
+        '--two_stage',
+        action='store_true',
+        help='Enable dynamic two-stage training.',
+    )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    print('--- Starting Training Run ---')
-    print(f'Selected Model Architecture: {args.model}')
-    print(f'Loss Function: {args.loss_type}')
-    print(f'Monitoring Metric for Early Stopping: {args.metric}')
-    print(f'Using device: {common_config.DEVICE}')
+    lr_stage1_map = {
+        'smp_siamese': 1e-2,
+        'custom_unet': 3e-2,
+    }
+    lr_stage2_map = {
+        'smp_siamese': 1e-5,
+        'custom_unet': 1e-6,
+    }
+    lr1 = lr_stage1_map[args.model]
+    lr2 = lr_stage2_map[args.model]
+    print(f'Using {args.model} architecture.')
+    print(f'Stage 1 LR set to: {lr1}')
+    print(f'Stage 2 LR set to: {lr2}')
 
     if 'loss' in args.metric:
         scheduler_mode = 'min'
@@ -128,10 +133,8 @@ def main():
     split_file_path = os.path.join(common_config.PROCESSED_DATA_DIR, 'splits.json')
     with open(split_file_path, 'r') as f:
         splits = json.load(f)
-
     train_ids = splits['train']
     val_ids = splits['validation']
-
     pos_weight = compute_pos_weight(common_config.PROCESSED_MASK_DIR, train_ids)
 
     train_dataset = BurnScarDataset(
@@ -167,21 +170,35 @@ def main():
         f'Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}'
     )
 
-    model = get_model(
-        args.model,
-        n_channels=common_config.N_CHANNELS,
-        n_classes=common_config.N_CLASSES,
-    ).to(common_config.DEVICE)
-
-    criterion = LOSS_FUNCTION_REGISTRY[args.loss_type]
-
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    model = get_model(args.model, common_config.N_CHANNELS, common_config.N_CLASSES).to(
+        common_config.DEVICE
     )
+    optimizer = optim.AdamW(model.parameters(), lr=lr1, weight_decay=args.weight_decay)
+
+    loss_fn_stage1_base = LOSS_FUNCTION_REGISTRY['bce_dice']
+    loss_fn_stage2_base = LOSS_FUNCTION_REGISTRY[args.loss_type]
+
+    if args.two_stage:
+        current_stage = 1
+        criterion = functools.partial(
+            loss_fn_stage1_base, bce_weight=0.5, pos_weight=pos_weight
+        )
+        print('Dynamic two-stage training enabled.')
+        print(
+            "Stage 1 initial loss: 'bce_dice' (50/50 balance), LR scheduler: OneCycleLR."
+        )
+    else:
+        current_stage = 2
+        criterion = functools.partial(
+            loss_fn_stage2_base, bce_weight=0.5, pos_weight=pos_weight
+        )
+        print(
+            f"Single-stage training enabled using '{args.loss_type}' loss (50/50 balance)."
+        )
 
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=args.lr,
+        max_lr=lr1,
         epochs=args.epochs,
         steps_per_epoch=len(train_loader),
         pct_start=0.1,
@@ -191,6 +208,9 @@ def main():
 
     epochs_no_improve = 0
     run_name = f'{args.model}_{args.loss_type}'
+    if args.two_stage:
+        run_name += '_2stage'
+
     model_save_path = os.path.join(
         common_config.MODEL_CHECKPOINT_DIR, f'best_model_{run_name}.pth'
     )
@@ -202,7 +222,31 @@ def main():
     print(f'Logging training progress to: {log_file_path}')
 
     for epoch in range(1, args.epochs + 1):
-        print(f'\n--- Epoch {epoch}/{args.epochs} ---')
+        if (
+            args.two_stage
+            and current_stage == 1
+            and epochs_no_improve >= args.early_stopping_patience
+        ):
+            print(f'\n--- Stage 1 converged (patience reached at epoch {epoch}). ---')
+            print(
+                f"--- Transitioning to Stage 2: Loss='{args.loss_type}', LR={lr2} ---"
+            )
+            current_stage = 2
+            criterion = functools.partial(
+                loss_fn_stage2_base, bce_weight=0.3, pos_weight=pos_weight
+            )
+
+            optimizer.param_groups[0]['lr'] = lr2
+            scheduler = CosineAnnealingLR(
+                optimizer, T_max=args.epochs - epoch + 1, eta_min=1e-7
+            )
+            epochs_no_improve = 0
+            if scheduler_mode == 'max':
+                best_val_metric = -np.inf
+            else:
+                best_val_metric = np.inf
+
+        print(f'\n--- Epoch {epoch}/{args.epochs} (Stage {current_stage}) ---')
 
         train_loss = train_one_epoch(
             model,
@@ -211,10 +255,9 @@ def main():
             common_config.DEVICE,
             scheduler,
             criterion,
-            pos_weight,
         )
         val_loss, val_f1, val_iou, val_auc = evaluate(
-            model, val_loader, common_config.DEVICE, criterion, pos_weight
+            model, val_loader, common_config.DEVICE, criterion
         )
 
         print(
@@ -238,6 +281,7 @@ def main():
             'val_loss': val_loss,
             'train_loss': train_loss,
             'learning_rate': current_lr,
+            'stage': current_stage,
         }
         log_df = pd.DataFrame([log_metrics])
         log_df.to_csv(
@@ -268,14 +312,43 @@ def main():
             print(f"✅ New best model saved to '{model_save_path}'")
         else:
             epochs_no_improve += 1
+
+        if epochs_no_improve >= args.early_stopping_patience:
+            if args.two_stage and current_stage == 1:
+                print(
+                    f'\n--- Stage 1 converged (patience reached at epoch {epoch}). ---'
+                )
+                print(
+                    f"--- Transitioning to Stage 2: Loss='{args.loss_type}', LR={lr2} ---"
+                )
+                current_stage = 2
+                criterion = loss_fn_stage2_base
+
+                optimizer.param_groups[0]['lr'] = lr2
+                scheduler = CosineAnnealingLR(
+                    optimizer,
+                    T_max=args.epochs - epoch,
+                    eta_min=1e-7,
+                )
+
+                epochs_no_improve = 0
+                if scheduler_mode == 'max':
+                    best_val_metric = -np.inf
+                else:
+                    best_val_metric = np.inf
+
+            else:
+                print(f'\nEarly stopping triggered after epoch {epoch}.')
+                print(
+                    f'No improvement in {args.metric} for {epochs_no_improve} epochs.'
+                )
+                print(f'Best validation {args.metric} achieved: {best_val_metric:.4f}')
+                break
+
+        if not improvement:
             print(
                 f'No significant improvement in {args.metric} for {epochs_no_improve} epoch(s).'
             )
-
-        if epochs_no_improve >= args.early_stopping_patience:
-            print(f'\nEarly stopping triggered after {epoch} epochs.')
-            print(f'Best validation {args.metric} achieved: {best_val_metric:.4f}')
-            break
 
     print('\n--- Training Finished ---')
 
