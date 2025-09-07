@@ -21,8 +21,8 @@ B_NIR = 1
 B_SWIR1 = 2
 B_SWIR2 = 3
 
-IN_CHANNELS = 9
-CLASSES = 1
+N_CHANNELS = 9
+N_CLASSES = 1
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 RANDOM_SEED = 42

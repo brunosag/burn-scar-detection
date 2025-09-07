@@ -2,7 +2,7 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
 
-# ======== Part 1: Architecture from Implementation A (SMP + Multi-scale CBAM) ========
+# ======== SMP + Multi-scale CBAM ========
 
 
 class ChannelAttention(nn.Module):
@@ -76,13 +76,14 @@ class FusionBlock(nn.Module):
 class SmpSiameseCBAM(nn.Module):
     """Implementation A Model: Siamese U-Net with SMP backbone and multi-scale CBAM fusion."""
 
-    def __init__(self, encoder_name, encoder_weights, in_channels, classes):
+    def __init__(self, n_channels, n_classes):
         super().__init__()
+
         self.model = smp.Unet(
-            encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
-            in_channels=in_channels,
-            classes=classes,
+            encoder_name='efficientnet-b0',
+            encoder_weights='imagenet',
+            in_channels=n_channels,
+            classes=n_classes,
         )
         self.encoder = self.model.encoder
         self.decoder = self.model.decoder
@@ -111,7 +112,7 @@ class SmpSiameseCBAM(nn.Module):
         return masks
 
 
-# ======== Part 2: Architecture from Implementation B (Custom U-Net) ========
+# ======== Custom U-Net ========
 
 
 class CustomDoubleConv(nn.Module):
@@ -206,36 +207,22 @@ class CustomUNetSiamese(nn.Module):
         return logits
 
 
-# ======== Part 3: Model Factory ========
+# ======== Model Factory ========
+
+MODEL_REGISTRY = {
+    'smp_siamese': SmpSiameseCBAM,
+    'custom_unet': CustomUNetSiamese,
+}
 
 
-def get_model(model_architecture: str, config_params: dict):
-    """
-    Factory function to create the specified model architecture.
-
-    Args:
-        model_architecture (str): Identifier for the model ('smp_siamese' or 'custom_unet').
-        config_params (dict): Dictionary containing model configuration parameters.
-
-    Returns:
-        torch.nn.Module: The instantiated model.
-    """
-    in_channels = config_params.get('in_channels', 9)
-    classes = config_params.get('classes', 1)
-
-    if model_architecture == 'smp_siamese':
-        print('Initializing SmpSiameseCBAM model (Implementation A style)')
-        return SmpSiameseCBAM(
-            encoder_name=config_params.get('encoder_name', 'efficientnet-b0'),
-            encoder_weights=config_params.get('encoder_weights', 'imagenet'),
-            in_channels=in_channels,
-            classes=classes,
+def get_model(model_id: str, n_channels: int, n_classes: int):
+    """Factory function to create the specified model architecture using a registry."""
+    if model_id not in MODEL_REGISTRY:
+        raise ValueError(
+            f'Unknown model architecture: {model_id}. Available: {list(MODEL_REGISTRY.keys())}'
         )
-    elif model_architecture == 'custom_unet':
-        print('Initializing CustomUNetSiamese model (Implementation B style)')
-        return CustomUNetSiamese(
-            n_channels=in_channels,
-            n_classes=classes,
-        )
-    else:
-        raise ValueError(f'Unknown model architecture: {model_architecture}')
+
+    model_class = MODEL_REGISTRY[model_id]
+
+    print(f'Initializing {model_class.__name__} model')
+    return model_class(n_channels=n_channels, n_classes=n_classes)

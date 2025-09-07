@@ -4,14 +4,16 @@ import os
 
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from burn_scar_detection import config as common_config
 from burn_scar_detection.data_loading import BurnScarDataset
-from burn_scar_detection.models import get_model
+from burn_scar_detection.inference import (
+    load_model_for_inference,
+    predict_batch_with_tta,
+)
 
 
 def get_tta_predictions(model, loader, device):
@@ -25,17 +27,7 @@ def get_tta_predictions(model, loader, device):
         ):
             t1, t2 = t1.to(device), t2.to(device)
 
-            pred_identity = torch.sigmoid(model(t1, t2))
-
-            pred_hflip_aug = torch.sigmoid(model(TF.hflip(t1), TF.hflip(t2)))
-            pred_hflip = TF.hflip(pred_hflip_aug)
-
-            pred_vflip_aug = torch.sigmoid(model(TF.vflip(t1), TF.vflip(t2)))
-            pred_vflip = TF.vflip(pred_vflip_aug)
-
-            avg_prob = torch.mean(
-                torch.stack([pred_identity, pred_hflip, pred_vflip]), dim=0
-            )
+            avg_prob = predict_batch_with_tta(model, t1, t2)
 
             all_probs.append(avg_prob.cpu().numpy())
             all_masks.append(mask.cpu().numpy())
@@ -94,16 +86,7 @@ def main():
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2
     )
 
-    model_params = {
-        'in_channels': common_config.IN_CHANNELS,
-        'classes': common_config.CLASSES,
-        'encoder_name': args.encoder_name,
-    }
-    model = get_model(args.model_architecture, model_params)
-    model.load_state_dict(
-        torch.load(args.model_path, map_location=common_config.DEVICE)
-    )
-    model.to(common_config.DEVICE)
+    model = load_model_for_inference(args.model)
 
     print('Calculating TTA predictions for threshold tuning...')
     all_probs, all_masks = get_tta_predictions(model, val_loader, common_config.DEVICE)

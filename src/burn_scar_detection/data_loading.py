@@ -70,26 +70,18 @@ class BurnScarDataset(Dataset):
         self,
         t1_feature_dir,
         t2_feature_dir,
-        mask_dir,
-        file_ids=None,
+        file_ids,
+        mask_dir=None,
         augmentations=None,
+        test_mode=False,
     ):
         self.t1_dir = t1_feature_dir
         self.t2_dir = t2_feature_dir
-        self.mask_dir = mask_dir
         self.augmentations = augmentations
-
-        if file_ids:
-            self.ids = file_ids
-        else:
-            print('Warning: No file_ids provided. Loading all files from directory.')
-            self.ids = sorted(
-                [
-                    f.replace('.npy', '')
-                    for f in os.listdir(t1_feature_dir)
-                    if f.endswith('.npy')
-                ]
-            )
+        self.ids = file_ids
+        self.test_mode = test_mode
+        if not test_mode:
+            self.mask_dir = mask_dir
 
     def __len__(self):
         return len(self.ids)
@@ -100,13 +92,18 @@ class BurnScarDataset(Dataset):
 
         t1_full_norm = np.load(os.path.join(self.t1_dir, fname_npy))
         t2_full_norm = np.load(os.path.join(self.t2_dir, fname_npy))
-        mask = np.load(os.path.join(self.mask_dir, fname_npy))
 
         t1 = torch.from_numpy(t1_full_norm).float()
         t2 = torch.from_numpy(t2_full_norm).float()
-        y = torch.from_numpy(mask).float().unsqueeze(0)
 
-        if self.augmentations:
-            t1, t2, y = self.augmentations(t1, t2, y)
+        if self.test_mode:
+            return t1, t2, id_
 
-        return t1, t2, y
+        elif self.mask_dir:
+            mask = np.load(os.path.join(self.mask_dir, fname_npy))
+            y = torch.from_numpy(mask).float().unsqueeze(0)
+
+            if self.augmentations:
+                t1, t2, y = self.augmentations(t1, t2, y)
+
+            return t1, t2, y

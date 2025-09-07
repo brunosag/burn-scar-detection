@@ -19,11 +19,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train Burn Scar Segmentation Model')
 
     parser.add_argument(
-        '--monitor_metric',
+        '--model',
         type=str,
-        choices=['iou', 'f1'],
-        default='f1',
-        help='Metric to monitor for early stopping and model selection',
+        required=True,
+        choices=['smp_siamese', 'custom_unet'],
+        help='Model architecture to train.',
     )
     parser.add_argument(
         '--epochs', type=int, default=200, help='Maximum number of training epochs'
@@ -31,30 +31,24 @@ def parse_args():
     parser.add_argument(
         '--batch_size', type=int, default=24, help='Training batch size'
     )
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument(
-        '--encoder_name',
-        type=str,
-        default='efficientnet-b0',
-        help='Backbone encoder for smp_siamese',
-    )
-    parser.add_argument(
-        '--encoder_weights',
-        type=str,
-        default='imagenet',
-        help='Pretrained weights for smp_siamese encoder',
-    )
+    parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
     parser.add_argument(
         '--early_stopping_patience',
         type=int,
         default=15,
-        help='Patience for early stopping',
+        help='Patience for early stopping (epochs without improvement)',
     )
     parser.add_argument(
         '--early_stopping_delta',
         type=float,
         default=0.0001,
-        help='Minimum improvement for early stopping',
+        help='Minimum improvement in F1 score to reset patience',
+    )
+    parser.add_argument(
+        '--scheduler_patience',
+        type=int,
+        default=5,
+        help='Patience for learning rate scheduler (epochs without improvement)',
     )
 
     return parser.parse_args()
@@ -107,25 +101,25 @@ def main():
         f'Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}'
     )
 
-    model_params = {
-        'in_channels': common_config.IN_CHANNELS,
-        'classes': common_config.CLASSES,
-        'encoder_name': args.encoder_name,
-        'encoder_weights': args.encoder_weights,
-    }
-    model = get_model(args.model, model_params).to(common_config.DEVICE)
+    model = get_model(
+        args.model,
+        n_channels=common_config.N_CHANNELS,
+        n_classes=common_config.N_CLASSES,
+    ).to(common_config.DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
 
-    best_metric = -1.0
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',
+        factor=0.1,
+        patience=args.scheduler_patience,
+    )
+
+    best_f1_score = -1.0
     epochs_no_improve = 0
 
-    run_name = (
-        f'{args.model}_{args.encoder_name}'
-        if args.model == 'smp_siamese'
-        else args.model
-    )
+    run_name = args.model
     model_save_path = os.path.join(
         common_config.MODEL_CHECKPOINT_DIR, f'best_model_{run_name}.pth'
     )
@@ -143,62 +137,62 @@ def main():
         'val_auc',
         'learning_rate',
     ]
-    with open(log_file_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
     print(f'Logging training progress to: {log_file_path}')
 
-    for epoch in range(1, args.epochs + 1):
-        print(f'\n--- Epoch {epoch}/{args.epochs} ---')
-        train_loss = train_one_epoch(
-            model, train_loader, optimizer, common_config.DEVICE
-        )
-        val_loss, val_f1, val_iou, val_auc = evaluate(
-            model, val_loader, common_config.DEVICE
-        )
+    with open(log_file_path, 'w', newline='') as log_file:
+        writer = csv.writer(log_file)
+        writer.writerow(csv_header)
 
-        print(
-            f'Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val IoU: {val_iou:.4f} | Val AUC: {val_auc:.4f} | Val F1: {val_f1:.4f}'
-        )
+        for epoch in range(1, args.epochs + 1):
+            print(f'\n--- Epoch {epoch}/{args.epochs} ---')
+            train_loss = train_one_epoch(
+                model, train_loader, optimizer, common_config.DEVICE
+            )
+            val_loss, val_f1, val_iou, val_auc = evaluate(
+                model, val_loader, common_config.DEVICE
+            )
 
-        scheduler.step(val_loss)
+            print(
+                f'Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | '
+                f'Val IoU: {val_iou:.4f} | Val AUC: {val_auc:.4f} | Val F1: {val_f1:.4f}'
+            )
 
-        current_lr = optimizer.param_groups[0]['lr']
-        log_data = [
-            epoch,
-            f'{train_loss:.6f}',
-            f'{val_loss:.6f}',
-            f'{val_f1:.6f}',
-            f'{val_iou:.6f}',
-            f'{val_auc:.6f}',
-            f'{current_lr:.8f}',
-        ]
-        with open(log_file_path, 'a', newline='') as f:
-            writer = csv.writer(f)
+            scheduler.step(val_f1)
+
+            current_lr = optimizer.param_groups[0]['lr']
+            log_data = [
+                epoch,
+                f'{current_lr:.8f}',
+                f'{val_f1:.6f}',
+                f'{val_auc:.6f}',
+                f'{val_iou:.6f}',
+                f'{val_loss:.6f}',
+                f'{train_loss:.6f}',
+            ]
             writer.writerow(log_data)
 
-        metric_now = val_f1 if args.monitor_metric == 'f1' else val_iou
-        improvement_delta = metric_now - best_metric
+            improvement_delta = val_f1 - best_f1_score
 
-        if improvement_delta > args.early_stopping_delta:
-            print(
-                f'Validation {args.monitor_metric.upper()} improved '
-                f'from {best_metric:.4f} to {metric_now:.4f}'
-            )
-            best_metric = metric_now
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), model_save_path)
-            print(f'✅ New best model saved to {model_save_path}')
-        else:
-            epochs_no_improve += 1
-            print(f'No significant improvement for {epochs_no_improve} epoch(s).')
+            if improvement_delta > args.early_stopping_delta:
+                print(
+                    f'Validation F1 improved from {best_f1_score:.4f} to {val_f1:.4f}'
+                )
+                best_f1_score = val_f1
+                epochs_no_improve = 0
+                torch.save(model.state_dict(), model_save_path)
+                print(f'✅ New best model saved to {model_save_path}')
+            else:
+                epochs_no_improve += 1
+                print(
+                    f'No significant improvement in F1 score for {epochs_no_improve} epoch(s).'
+                )
 
-        if epochs_no_improve >= args.early_stopping_patience:
-            print(f'\nEarly stopping triggered after {epoch} epochs.')
-            print(
-                f'Best validation {args.monitor_metric.upper()} achieved: {best_metric:.4f}'
-            )
-            break
+            if epochs_no_improve >= args.early_stopping_patience:
+                print(f'\nEarly stopping triggered after {epoch} epochs.')
+                print(f'Best validation F1 achieved: {best_f1_score:.4f}')
+                break
+
+    print('\n--- Training Finished ---')
 
 
 if __name__ == '__main__':
