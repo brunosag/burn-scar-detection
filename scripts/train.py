@@ -6,13 +6,49 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from burn_scar_detection import config as common_config
+from burn_scar_detection import losses
 from burn_scar_detection.data_loading import BurnScarDataset, JointTransform
 from burn_scar_detection.engine import evaluate, train_one_epoch
 from burn_scar_detection.models import get_model
+
+
+def compute_pos_weight(mask_dir, file_ids):
+    """Calculates pos_weight to counter class imbalance in training data."""
+    print(f'Calculating pos_weight from {len(file_ids)} training masks...')
+    pos_pixels = 0
+    neg_pixels = 0
+    for id_ in tqdm(file_ids, desc='Analyzing mask imbalance'):
+        mask_path = os.path.join(mask_dir, f'{id_}.npy')
+        if not os.path.exists(mask_path):
+            print(f'Warning: Mask file not found {mask_path}, skipping.')
+            continue
+
+        try:
+            m = np.load(mask_path)
+            pos_pixels += (m > 0.5).sum()
+            neg_pixels += (m <= 0.5).sum()
+        except Exception as e:
+            print(f'Error loading mask {id_}: {e}')
+
+    if pos_pixels == 0:
+        print(
+            'Warning: No positive pixels found in training set for weight calculation.'
+        )
+        return torch.tensor(1.0, device=common_config.DEVICE)
+
+    weight = float(neg_pixels / pos_pixels)
+    print(f'Negative/Positive pixel ratio (pos_weight): {weight:.2f}')
+    return torch.tensor([weight], device=common_config.DEVICE)
+
+
+LOSS_FUNCTION_REGISTRY = {
+    'bce_lovasz': losses.bce_lovasz_loss,
+    'bce_dice': losses.bce_dice_loss,
+}
 
 
 def parse_args():
@@ -27,38 +63,49 @@ def parse_args():
         help='Model architecture to train.',
     )
     parser.add_argument(
-        '--metric',
+        '--loss_type',
         type=str,
-        default='val_auc',
-        choices=['val_loss', 'val_f1', 'val_auc', 'val_iou'],
-        help='Metric to monitor for early stopping and LR scheduler.',
+        default='bce_lovasz',
+        choices=LOSS_FUNCTION_REGISTRY.keys(),
+        help='Loss function to use. Recommended: bce_lovasz.',
     )
     parser.add_argument(
-        '--epochs', type=int, default=200, help='Maximum number of training epochs'
+        '--metric',
+        type=str,
+        default='val_f1',
+        choices=['val_loss', 'val_f1', 'val_auc', 'val_iou'],
+        help='Metric to monitor for early stopping. Recommended: val_f1 or val_iou.',
+    )
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=100,
+        help='Maximum number of training epochs',
     )
     parser.add_argument(
         '--batch_size', type=int, default=24, help='Training batch size'
     )
-    parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
+    parser.add_argument(
+        '--lr',
+        type=float,
+        default=1e-3,
+        help='Initial learning rate (max_lr for OneCycleLR)',
+    )
+    parser.add_argument(
+        '--weight_decay', type=float, default=1e-2, help='AdamW weight decay parameter.'
+    )
     parser.add_argument(
         '--early_stopping_patience',
         type=int,
-        default=15,
+        default=20,
         help='Patience for early stopping (epochs without improvement)',
     )
     parser.add_argument(
         '--early_stopping_delta',
         type=float,
-        default=0.0001,
+        default=0.001,
         help='Minimum improvement in monitored metric to reset patience',
     )
-    parser.add_argument(
-        '--scheduler_patience',
-        type=int,
-        default=5,
-        help='Patience for learning rate scheduler (epochs without improvement)',
-    )
-
     return parser.parse_args()
 
 
@@ -67,6 +114,7 @@ def main():
 
     print('--- Starting Training Run ---')
     print(f'Selected Model Architecture: {args.model}')
+    print(f'Loss Function: {args.loss_type}')
     print(f'Monitoring Metric for Early Stopping: {args.metric}')
     print(f'Using device: {common_config.DEVICE}')
 
@@ -83,6 +131,8 @@ def main():
 
     train_ids = splits['train']
     val_ids = splits['validation']
+
+    pos_weight = compute_pos_weight(common_config.PROCESSED_MASK_DIR, train_ids)
 
     train_dataset = BurnScarDataset(
         t1_feature_dir=common_config.PROCESSED_FEATURES_T1_DIR,
@@ -123,17 +173,24 @@ def main():
         n_classes=common_config.N_CLASSES,
     ).to(common_config.DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    criterion = LOSS_FUNCTION_REGISTRY[args.loss_type]
 
-    scheduler = ReduceLROnPlateau(
+    optimizer = optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
+
+    scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        mode=scheduler_mode,
-        factor=0.1,
-        patience=args.scheduler_patience,
+        max_lr=args.lr,
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.1,
+        anneal_strategy='cos',
+        final_div_factor=1e4,
     )
 
     epochs_no_improve = 0
-    run_name = args.model
+    run_name = f'{args.model}_{args.loss_type}'
     model_save_path = os.path.join(
         common_config.MODEL_CHECKPOINT_DIR, f'best_model_{run_name}.pth'
     )
@@ -146,11 +203,18 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         print(f'\n--- Epoch {epoch}/{args.epochs} ---')
+
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, common_config.DEVICE
+            model,
+            train_loader,
+            optimizer,
+            common_config.DEVICE,
+            scheduler,
+            criterion,
+            pos_weight,
         )
         val_loss, val_f1, val_iou, val_auc = evaluate(
-            model, val_loader, common_config.DEVICE
+            model, val_loader, common_config.DEVICE, criterion, pos_weight
         )
 
         print(
@@ -164,8 +228,6 @@ def main():
             'val_loss': val_loss,
         }
         current_metric_value = metrics_epoch[args.metric]
-
-        scheduler.step(current_metric_value)
         current_lr = optimizer.param_groups[0]['lr']
 
         log_metrics = {

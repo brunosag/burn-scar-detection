@@ -1,47 +1,56 @@
 import numpy as np
-import segmentation_models_pytorch as smp
 import torch
 from sklearn.metrics import roc_auc_score
 from torchmetrics.functional.classification import binary_f1_score, binary_jaccard_index
 from tqdm import tqdm
 
-dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True)
-focal_loss = smp.losses.FocalLoss(mode='binary')
 
-
-def composite_loss(y_pred_logits, y_true):
-    return 0.5 * dice_loss(y_pred_logits, y_true) + 0.5 * focal_loss(
-        y_pred_logits, y_true
-    )
-
-
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(
+    model, loader, optimizer, device, scheduler, loss_fn, pos_weight, grad_clip_norm=1.0
+):
+    """
+    - Uses a flexible loss function (loss_fn).
+    - Applies pos_weight for imbalance handling.
+    - Steps the scheduler every batch (for OneCycleLR).
+    - Applies gradient clipping.
+    """
     model.train()
     loop = tqdm(loader, desc='Training')
     total_loss = 0
     for t1, t2, mask in loop:
         t1, t2, mask = t1.to(device), t2.to(device), mask.to(device)
         optimizer.zero_grad()
+
         predictions_logits = model(t1, t2)
-        loss = composite_loss(predictions_logits, mask)
+        loss = loss_fn(predictions_logits, mask, pos_weight)
+
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
+
         total_loss += loss.item()
         loop.set_postfix(loss=loss.item())
+
     return total_loss / len(loader)
 
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, loss_fn, pos_weight):
+    """Evaluation epoch to use the flexible loss function."""
     model.eval()
     total_loss = 0
     all_probs_flat, all_masks_flat = [], []
     all_preds_bin, all_masks_bin = [], []
+
     with torch.no_grad():
         loop = tqdm(loader, desc='Evaluating')
         for t1, t2, mask in loop:
             t1, t2, mask = t1.to(device), t2.to(device), mask.to(device)
             predictions_logits = model(t1, t2)
-            loss = composite_loss(predictions_logits, mask)
+
+            loss = loss_fn(predictions_logits, mask, pos_weight)
             total_loss += loss.item()
 
             predictions_probs = torch.sigmoid(predictions_logits)
