@@ -1,8 +1,8 @@
 import argparse
-import csv
 import json
 import os
 
+import pandas as pd
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -128,69 +128,60 @@ def main():
     )
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
-    csv_header = [
-        'epoch',
-        'train_loss',
-        'val_loss',
-        'val_f1',
-        'val_iou',
-        'val_auc',
-        'learning_rate',
-    ]
     print(f'Logging training progress to: {log_file_path}')
 
-    with open(log_file_path, 'w', newline='') as log_file:
-        writer = csv.writer(log_file)
-        writer.writerow(csv_header)
+    for epoch in range(1, args.epochs + 1):
+        print(f'\n--- Epoch {epoch}/{args.epochs} ---')
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, common_config.DEVICE
+        )
+        val_loss, val_f1, val_iou, val_auc = evaluate(
+            model, val_loader, common_config.DEVICE
+        )
 
-        for epoch in range(1, args.epochs + 1):
-            print(f'\n--- Epoch {epoch}/{args.epochs} ---')
-            train_loss = train_one_epoch(
-                model, train_loader, optimizer, common_config.DEVICE
-            )
-            val_loss, val_f1, val_iou, val_auc = evaluate(
-                model, val_loader, common_config.DEVICE
-            )
+        print(
+            f'F1: {val_f1:.4f} | AUC-ROC: {val_auc:.4f} | IoU: {val_iou:.4f} | Val. Loss: {val_loss:.4f} | Train Loss: {train_loss:.4f}'
+        )
 
+        scheduler.step(val_f1)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        log_metrics = {
+            'epoch': epoch,
+            'val_f1': val_f1,
+            'val_auc': val_auc,
+            'val_iou': val_iou,
+            'val_loss': val_loss,
+            'train_loss': train_loss,
+            'learning_rate': current_lr,
+        }
+        log_df = pd.DataFrame([log_metrics])
+        log_df.to_csv(
+            log_file_path,
+            mode='w' if epoch == 1 else 'a',
+            header=epoch == 1,
+            index=False,
+            float_format='%.6f',
+        )
+
+        improvement_delta = val_f1 - best_f1_score
+
+        if improvement_delta > args.early_stopping_delta:
+            print(f'Validation F1 improved from {best_f1_score:.4f} to {val_f1:.4f}')
+            best_f1_score = val_f1
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), model_save_path)
+            print(f"✅ New best model saved to '{model_save_path}'")
+        else:
+            epochs_no_improve += 1
             print(
-                f'Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | '
-                f'Val IoU: {val_iou:.4f} | Val AUC: {val_auc:.4f} | Val F1: {val_f1:.4f}'
+                f'No significant improvement in F1 score for {epochs_no_improve} epoch(s).'
             )
 
-            scheduler.step(val_f1)
-
-            current_lr = optimizer.param_groups[0]['lr']
-            log_data = [
-                epoch,
-                f'{current_lr:.8f}',
-                f'{val_f1:.6f}',
-                f'{val_auc:.6f}',
-                f'{val_iou:.6f}',
-                f'{val_loss:.6f}',
-                f'{train_loss:.6f}',
-            ]
-            writer.writerow(log_data)
-
-            improvement_delta = val_f1 - best_f1_score
-
-            if improvement_delta > args.early_stopping_delta:
-                print(
-                    f'Validation F1 improved from {best_f1_score:.4f} to {val_f1:.4f}'
-                )
-                best_f1_score = val_f1
-                epochs_no_improve = 0
-                torch.save(model.state_dict(), model_save_path)
-                print(f'✅ New best model saved to {model_save_path}')
-            else:
-                epochs_no_improve += 1
-                print(
-                    f'No significant improvement in F1 score for {epochs_no_improve} epoch(s).'
-                )
-
-            if epochs_no_improve >= args.early_stopping_patience:
-                print(f'\nEarly stopping triggered after {epoch} epochs.')
-                print(f'Best validation F1 achieved: {best_f1_score:.4f}')
-                break
+        if epochs_no_improve >= args.early_stopping_patience:
+            print(f'\nEarly stopping triggered after {epoch} epochs.')
+            print(f'Best validation F1 achieved: {best_f1_score:.4f}')
+            break
 
     print('\n--- Training Finished ---')
 
