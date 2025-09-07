@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
@@ -26,6 +27,13 @@ def parse_args():
         help='Model architecture to train.',
     )
     parser.add_argument(
+        '--metric',
+        type=str,
+        default='val_auc',
+        choices=['val_loss', 'val_f1', 'val_auc', 'val_iou'],
+        help='Metric to monitor for early stopping and LR scheduler.',
+    )
+    parser.add_argument(
         '--epochs', type=int, default=200, help='Maximum number of training epochs'
     )
     parser.add_argument(
@@ -42,7 +50,7 @@ def parse_args():
         '--early_stopping_delta',
         type=float,
         default=0.0001,
-        help='Minimum improvement in F1 score to reset patience',
+        help='Minimum improvement in monitored metric to reset patience',
     )
     parser.add_argument(
         '--scheduler_patience',
@@ -59,7 +67,15 @@ def main():
 
     print('--- Starting Training Run ---')
     print(f'Selected Model Architecture: {args.model}')
+    print(f'Monitoring Metric for Early Stopping: {args.metric}')
     print(f'Using device: {common_config.DEVICE}')
+
+    if 'loss' in args.metric:
+        scheduler_mode = 'min'
+        best_val_metric = np.inf
+    else:
+        scheduler_mode = 'max'
+        best_val_metric = -np.inf
 
     split_file_path = os.path.join(common_config.PROCESSED_DATA_DIR, 'splits.json')
     with open(split_file_path, 'r') as f:
@@ -111,14 +127,12 @@ def main():
 
     scheduler = ReduceLROnPlateau(
         optimizer,
-        mode='max',
+        mode=scheduler_mode,
         factor=0.1,
         patience=args.scheduler_patience,
     )
 
-    best_f1_score = -1.0
     epochs_no_improve = 0
-
     run_name = args.model
     model_save_path = os.path.join(
         common_config.MODEL_CHECKPOINT_DIR, f'best_model_{run_name}.pth'
@@ -140,16 +154,24 @@ def main():
         )
 
         print(
-            f'F1: {val_f1:.4f} | AUC-ROC: {val_auc:.4f} | IoU: {val_iou:.4f} | Val. Loss: {val_loss:.4f} | Train Loss: {train_loss:.4f}'
+            f'AUC-ROC: {val_auc:.4f} | F1: {val_f1:.4f} | IoU: {val_iou:.4f} | Val. Loss: {val_loss:.4f} | Train Loss: {train_loss:.4f}'
         )
 
-        scheduler.step(val_f1)
+        metrics_epoch = {
+            'val_auc': val_auc,
+            'val_f1': val_f1,
+            'val_iou': val_iou,
+            'val_loss': val_loss,
+        }
+        current_metric_value = metrics_epoch[args.metric]
+
+        scheduler.step(current_metric_value)
         current_lr = optimizer.param_groups[0]['lr']
 
         log_metrics = {
             'epoch': epoch,
-            'val_f1': val_f1,
             'val_auc': val_auc,
+            'val_f1': val_f1,
             'val_iou': val_iou,
             'val_loss': val_loss,
             'train_loss': train_loss,
@@ -164,23 +186,33 @@ def main():
             float_format='%.6f',
         )
 
-        improvement_delta = val_f1 - best_f1_score
+        improvement = False
+        if scheduler_mode == 'max':
+            improvement_margin = current_metric_value - best_val_metric
+            if improvement_margin > args.early_stopping_delta:
+                improvement = True
+        else:
+            improvement_margin = best_val_metric - current_metric_value
+            if improvement_margin > args.early_stopping_delta:
+                improvement = True
 
-        if improvement_delta > args.early_stopping_delta:
-            print(f'Validation F1 improved from {best_f1_score:.4f} to {val_f1:.4f}')
-            best_f1_score = val_f1
+        if improvement:
+            print(
+                f'Validation metric ({args.metric}) improved from {best_val_metric:.4f} to {current_metric_value:.4f}'
+            )
+            best_val_metric = current_metric_value
             epochs_no_improve = 0
             torch.save(model.state_dict(), model_save_path)
             print(f"✅ New best model saved to '{model_save_path}'")
         else:
             epochs_no_improve += 1
             print(
-                f'No significant improvement in F1 score for {epochs_no_improve} epoch(s).'
+                f'No significant improvement in {args.metric} for {epochs_no_improve} epoch(s).'
             )
 
         if epochs_no_improve >= args.early_stopping_patience:
             print(f'\nEarly stopping triggered after {epoch} epochs.')
-            print(f'Best validation F1 achieved: {best_f1_score:.4f}')
+            print(f'Best validation {args.metric} achieved: {best_val_metric:.4f}')
             break
 
     print('\n--- Training Finished ---')
