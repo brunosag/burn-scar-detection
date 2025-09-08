@@ -44,6 +44,15 @@ def parse_args():
         required=True,
         help='Optimal decision threshold found during tuning.',
     )
+    parser.add_argument(
+        '--batch_size', type=int, default=38, help='Training batch size'
+    )
+    parser.add_argument(
+        '--output_csv',
+        type=str,
+        required=True,
+        help='Path to save the submission CSV file',
+    )
     return parser.parse_args()
 
 

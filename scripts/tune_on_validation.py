@@ -60,16 +60,14 @@ def main():
         description='Tune decision threshold using validation data.'
     )
     parser.add_argument(
-        '--model_path', type=str, required=True, help='Path to model checkpoint.'
-    )
-    parser.add_argument(
-        '--model_architecture',
+        '--model',
         type=str,
         required=True,
         choices=['smp_siamese', 'custom_unet'],
+        help='Model architecture to train.',
     )
     parser.add_argument('--encoder_name', type=str, default='efficientnet-b0')
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=38)
     args = parser.parse_args()
 
     split_file_path = os.path.join(common_config.PROCESSED_DATA_DIR, 'splits.json')
@@ -93,14 +91,14 @@ def main():
     best_threshold, best_f1 = find_optimal_threshold(all_probs, all_masks)
 
     print('\n--- Tuning Complete ---')
-    print(f'Model: {args.model_path}')
+    print(f'Model: {args.model}')
     print(f'Best F1 Score on Validation Set (with TTA): {best_f1:.4f}')
     print(f'Optimal Threshold: {best_threshold:.4f}')
 
     results = {'best_threshold': best_threshold, 'validation_f1_tta': best_f1}
     output_filename = os.path.join(
-        os.path.dirname(args.model_path),
-        f'best_threshold_{args.model_architecture}.json',
+        common_config.MODEL_CHECKPOINT_DIR,
+        f'best_threshold_{args.model}.json',
     )
     with open(output_filename, 'w') as f:
         json.dump(results, f, indent=4)

@@ -36,13 +36,19 @@ def _compute_spectral_features(raw_patch):
     for key, value in params.items():
         params[key] = value + 1e-8
 
-    indices = spyndex.computeIndex(index=['NBR', 'NBRSWIR'], params=params)
+    indices = spyndex.computeIndex(index=['NBR', 'NBRSWIR', 'NDVI'], params=params)
     indices = np.nan_to_num(np.array(indices), nan=0.0)
-    return indices.astype(np.float32)
+
+    return {
+        'nbr': indices[0],
+        'nbrswir': indices[1],
+        'ndvi': indices[2],
+    }
 
 
 def _compute_glcm_features(
-    patch, properties=['contrast', 'homogeneity', 'correlation']
+    patch,
+    properties=['contrast', 'homogeneity', 'correlation', 'dissimilarity', 'energy'],
 ):
     """Computes global GLCM features for the NIR band."""
     nir_band = patch[B_NIR, :, :]
@@ -78,10 +84,13 @@ def _get_feature_stack(patch_id, time_step, raw_data_dir):
     with rasterio.open(raw_path) as src:
         raw_patch = src.read().astype(np.float32)
 
-    spectral_feats = _compute_spectral_features(raw_patch)
+    spectral_dict = _compute_spectral_features(raw_patch)
+    spectral_feats = np.stack(
+        [spectral_dict['nbr'], spectral_dict['nbrswir'], spectral_dict['ndvi']], axis=0
+    )
     glcm_feats = _compute_glcm_features(raw_patch)
     full_feature_stack = np.vstack((raw_patch, spectral_feats, glcm_feats))
-    return full_feature_stack
+    return full_feature_stack, spectral_dict
 
 
 def calculate_and_save_statistics(train_ids):
@@ -91,10 +100,23 @@ def calculate_and_save_statistics(train_ids):
     all_t2_data = []
 
     for id_ in tqdm(train_ids, desc='Loading training data for stats'):
-        t1_stack = _get_feature_stack(id_, 't1', RAW_T1_DIR)
-        t2_stack = _get_feature_stack(id_, 't2', RAW_T2_DIR)
-        all_t1_data.append(t1_stack.reshape(t1_stack.shape[0], -1))
-        all_t2_data.append(t2_stack.reshape(t2_stack.shape[0], -1))
+        t1_stack, t1_spectral = _get_feature_stack(id_, 't1', RAW_T1_DIR)
+        t2_stack, t2_spectral = _get_feature_stack(id_, 't2', RAW_T2_DIR)
+
+        d_nbr = t1_spectral['nbr'] - t2_spectral['nbr']
+        d_ndvi = t1_spectral['ndvi'] - t2_spectral['ndvi']
+        diff_stack = np.stack([d_nbr, d_ndvi], axis=0).astype(np.float32)
+        diff_stack = np.nan_to_num(diff_stack, nan=0.0)
+        t2_stack_with_diffs = np.vstack((t2_stack, diff_stack))
+
+        height, width = t1_stack.shape[1:]
+        zero_pad = np.zeros((2, height, width), dtype=np.float32)
+        t1_stack_with_pad = np.vstack((t1_stack, zero_pad))
+
+        all_t1_data.append(t1_stack_with_pad.reshape(t1_stack_with_pad.shape[0], -1))
+        all_t2_data.append(
+            t2_stack_with_diffs.reshape(t2_stack_with_diffs.shape[0], -1)
+        )
 
     t1_full = np.concatenate(all_t1_data, axis=1)
     t2_full = np.concatenate(all_t2_data, axis=1)
@@ -113,6 +135,8 @@ def calculate_and_save_statistics(train_ids):
 
     np.savez_compressed(STATS_FILE, t1=stats['t1'], t2=stats['t2'])
     print(f'Global statistics saved to {STATS_FILE}')
+    print(f'T1 data shape: {t1_full.shape}')
+    print(f'T2 data shape (with diffs): {t2_full.shape}')
     return stats
 
 
@@ -131,6 +155,25 @@ def apply_global_normalization(patch_stack, stats):
     return normalized_stack
 
 
+def _compute_and_append_diffs(ids, output_dirs, raw_dirs):
+    """Computes differential indices and appends them to t2 feature stacks."""
+    for id_ in tqdm(ids, desc='Computing and appending differentials'):
+        t2_path = os.path.join(output_dirs['t2'], f'{id_}.npy')
+        t2_stack = np.load(t2_path)
+
+        _, t1_spectral = _get_feature_stack(id_, 't1', raw_dirs['t1'])
+        _, t2_spectral = _get_feature_stack(id_, 't2', raw_dirs['t2'])
+
+        d_nbr = t1_spectral['nbr'] - t2_spectral['nbr']
+        d_ndvi = t1_spectral['ndvi'] - t2_spectral['ndvi']
+
+        diff_stack = np.stack([d_nbr, d_ndvi], axis=0).astype(np.float32)
+        diff_stack = np.nan_to_num(diff_stack, nan=0.0)
+
+        updated_t2 = np.vstack((t2_stack, diff_stack))
+        np.save(t2_path, updated_t2)
+
+
 def process_split_data(ids, global_stats, raw_dirs, output_dirs, process_mask=True):
     """Processes features and masks for a given set of file IDs."""
     os.makedirs(output_dirs['t1'], exist_ok=True)
@@ -143,10 +186,17 @@ def process_split_data(ids, global_stats, raw_dirs, output_dirs, process_mask=Tr
         time_specific_stats = global_stats[time_step]
 
         for id_ in tqdm(ids, desc=f'Applying normalization for {time_step}'):
-            feature_stack = _get_feature_stack(id_, time_step, raw_dirs[in_dir_key])
+            feature_stack, _ = _get_feature_stack(id_, time_step, raw_dirs[in_dir_key])
+
             normalized_stack = apply_global_normalization(
                 feature_stack, time_specific_stats
             )
+
+            if time_step == 't1':
+                height, width = normalized_stack.shape[1:]
+                zero_pad = np.zeros((2, height, width), dtype=np.float32)
+                normalized_stack = np.vstack((normalized_stack, zero_pad))
+
             np.save(
                 os.path.join(output_dirs[out_dir_key], f'{id_}.npy'), normalized_stack
             )
@@ -159,6 +209,8 @@ def process_split_data(ids, global_stats, raw_dirs, output_dirs, process_mask=Tr
                 mask = src.read(1)
             mask_binary = np.where(mask > 0, 1.0, 0.0).astype(np.float32)
             np.save(os.path.join(output_dirs['mask'], f'{id_}.npy'), mask_binary)
+
+    _compute_and_append_diffs(ids, output_dirs, raw_dirs)
 
 
 def main():

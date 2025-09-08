@@ -2,8 +2,6 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
 
-# ======== SMP + Multi-scale CBAM ========
-
 
 class ChannelAttention(nn.Module):
     """Channel Attention Module (from Implementation A)."""
@@ -112,9 +110,6 @@ class SmpSiameseCBAM(nn.Module):
         return masks
 
 
-# ======== Custom U-Net ========
-
-
 class CustomDoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2 (from Implementation B)."""
 
@@ -207,11 +202,45 @@ class CustomUNetSiamese(nn.Module):
         return logits
 
 
-# ======== Model Factory ========
+class SmpUnetPlusPlus(nn.Module):
+    """U-Net++ variant with SMP for better multi-scale fusion."""
+
+    def __init__(self, n_channels, n_classes):
+        super().__init__()
+        self.model = smp.UnetPlusPlus(
+            encoder_name='efficientnet-b0',
+            encoder_weights='imagenet',
+            in_channels=n_channels,
+            classes=n_classes,
+        )
+        self.cbam_blocks = nn.ModuleList(
+            [CBAMBlock(ch) for ch in self.model.encoder.out_channels]
+        )
+        self.fusion_blocks = nn.ModuleList(
+            [FusionBlock(ch) for ch in self.model.encoder.out_channels]
+        )
+
+    def forward(self, t1, t2):
+        f1_features = self.model.encoder(t1)
+        f2_features = self.model.encoder(t2)
+
+        fused_skip_features = []
+        for i, (f1, f2) in enumerate(zip(f1_features, f2_features)):
+            difference = torch.abs(f1 - f2)
+            attended_difference = self.cbam_blocks[i](difference)
+            fused_output = self.fusion_blocks[i](f1, f2, attended_difference)
+            fused_skip_features.append(fused_output)
+
+        decoder_output = self.model.decoder(fused_skip_features)
+
+        masks = self.model.segmentation_head(decoder_output)
+        return masks
+
 
 MODEL_REGISTRY = {
     'smp_siamese': SmpSiameseCBAM,
     'custom_unet': CustomUNetSiamese,
+    'smp_unetpp': SmpUnetPlusPlus,
 }
 
 

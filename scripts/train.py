@@ -59,7 +59,7 @@ def parse_args():
         '--model',
         type=str,
         required=True,
-        choices=['smp_siamese', 'custom_unet'],
+        choices=['smp_siamese', 'custom_unet', 'smp_unetpp'],
         help='Model architecture to train.',
     )
     parser.add_argument(
@@ -80,21 +80,21 @@ def parse_args():
         '--epochs', type=int, default=150, help='Maximum number of training epochs'
     )
     parser.add_argument(
-        '--batch_size', type=int, default=36, help='Training batch size'
+        '--batch_size', type=int, default=32, help='Training batch size'
     )
     parser.add_argument(
-        '--weight_decay', type=float, default=1e-2, help='AdamW weight decay parameter.'
+        '--weight_decay', type=float, default=1e-4, help='AdamW weight decay parameter.'
     )
     parser.add_argument(
         '--early_stopping_patience',
         type=int,
-        default=15,
+        default=20,
         help='Patience for early stopping/stage transition.',
     )
     parser.add_argument(
         '--early_stopping_delta',
         type=float,
-        default=0.001,
+        default=0.002,
         help='Minimum improvement in monitored metric to reset patience.',
     )
     parser.add_argument(
@@ -109,16 +109,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    lr_stage1_map = {
-        'smp_siamese': 1e-2,
-        'custom_unet': 3e-2,
-    }
-    lr_stage2_map = {
-        'smp_siamese': 1e-5,
-        'custom_unet': 1e-6,
-    }
-    lr1 = lr_stage1_map[args.model]
-    lr2 = lr_stage2_map[args.model]
+    lr1 = 5e-3
+    lr2 = 5e-5
+
     print(f'Using {args.model} architecture.')
     print(f'Stage 1 LR set to: {lr1}')
     print(f'Stage 2 LR set to: {lr2}')

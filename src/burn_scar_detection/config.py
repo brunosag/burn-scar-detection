@@ -21,7 +21,8 @@ B_NIR = 1
 B_SWIR1 = 2
 B_SWIR2 = 3
 
-N_CHANNELS = 9
+# 4 raw bands + 3 spectral (NBR, NBRSWIR, NDVI) + 5 GLCM + 2 differentials (dNBR, dNDVI)
+N_CHANNELS = 14
 N_CLASSES = 1
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
