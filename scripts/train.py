@@ -15,7 +15,7 @@ from burn_scar_detection import config as common_config
 from burn_scar_detection import losses as loss_module
 from burn_scar_detection.data_loading import BurnScarDataset, JointTransform
 from burn_scar_detection.engine import evaluate, train_one_epoch
-from burn_scar_detection.models import get_model
+from burn_scar_detection.models import MODEL_REGISTRY, get_model
 
 
 def compute_pos_weight(mask_dir, file_ids):
@@ -59,13 +59,13 @@ def parse_args():
         '--model',
         type=str,
         required=True,
-        choices=['smp_siamese', 'custom_unet', 'smp_unetpp'],
+        choices=MODEL_REGISTRY.keys(),
         help='Model architecture to train.',
     )
     parser.add_argument(
         '--loss_type',
         type=str,
-        default='bce_lovasz',
+        default='bce_dice',
         choices=LOSS_FUNCTION_REGISTRY.keys(),
         help='Loss function for final stage or single-stage training.',
     )
@@ -83,12 +83,12 @@ def parse_args():
         '--batch_size', type=int, default=32, help='Training batch size'
     )
     parser.add_argument(
-        '--weight_decay', type=float, default=1e-4, help='AdamW weight decay parameter.'
+        '--weight_decay', type=float, default=1e-3, help='AdamW weight decay parameter.'
     )
     parser.add_argument(
         '--early_stopping_patience',
         type=int,
-        default=20,
+        default=15,
         help='Patience for early stopping/stage transition.',
     )
     parser.add_argument(
@@ -109,8 +109,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    lr1 = 5e-3
-    lr2 = 5e-5
+    lr1 = 3e-3
+    lr2 = 7e-5
 
     print(f'Using {args.model} architecture.')
     print(f'Stage 1 LR set to: {lr1}')

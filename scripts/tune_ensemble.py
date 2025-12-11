@@ -16,20 +16,26 @@ from burn_scar_detection.inference import (
 )
 
 
-def get_tta_predictions(model, loader, device):
-    """Run model on validation set with TTA and collect predictions/ground truths."""
-    model.eval()
+def get_tta_predictions(models, loader, device):
+    """Run ensemble on validation set with TTA and collect averaged predictions/ground truths."""
+    for model in models:
+        model.eval()
     all_probs = []
     all_masks = []
     with torch.no_grad():
         for t1, t2, mask in tqdm(
-            loader, desc='Generating validation predictions with TTA'
+            loader, desc='Generating validation predictions with ensemble TTA'
         ):
             t1, t2 = t1.to(device), t2.to(device)
 
-            avg_prob = predict_batch_with_tta(model, t1, t2)
+            # Average across ensemble (each with TTA)
+            ensemble_probs_batch = []
+            for model in models:
+                probs_batch = predict_batch_with_tta(model, t1, t2)
+                ensemble_probs_batch.append(probs_batch)
+            avg_probs_batch = torch.mean(torch.stack(ensemble_probs_batch), dim=0)
 
-            all_probs.append(avg_prob.cpu().numpy())
+            all_probs.append(avg_probs_batch.cpu().numpy())
             all_masks.append(mask.cpu().numpy())
 
     all_probs = np.concatenate(all_probs, axis=0)
@@ -57,16 +63,8 @@ def find_optimal_threshold(all_probs, all_masks):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Tune decision threshold using validation data.'
+        description='Tune decision threshold using validation data for ensemble.'
     )
-    parser.add_argument(
-        '--model',
-        type=str,
-        required=True,
-        choices=['smp_siamese', 'custom_unet', 'smp_unetpp'],
-        help='Model architecture to train.',
-    )
-    parser.add_argument('--encoder_name', type=str, default='efficientnet-b0')
     parser.add_argument('--batch_size', type=int, default=38)
     args = parser.parse_args()
 
@@ -84,27 +82,48 @@ def main():
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2
     )
 
-    model = load_model_for_inference(
-        args.model, f'models/best_model_{args.model}_bce_lovasz_2stage.pth'
-    )
+    # Define ensemble: list of (model_id, checkpoint_path) tuples
+    ensemble = [
+        (
+            'smp_siamese',
+            'models/best_model_smp_siamese_bce_lovasz_2stage.pth',
+        ),  # GLCM run (F1 0.8964)
+        (
+            'smp_unetpp',
+            'models/best_model_smp_unetpp_bce_lovasz_2stage.pth',
+        ),  # U-Net++ run (F1 0.8864)
+        (
+            'custom_unet',
+            'models/best_model_custom_unet_bce_lovasz_2stage.pth',
+        ),  # Original from README (F1 0.8889)
+    ]
 
-    print('Calculating TTA predictions for threshold tuning...')
-    all_probs, all_masks = get_tta_predictions(model, val_loader, common_config.DEVICE)
+    # Load all models
+    models = []
+    for mid, path in ensemble:
+        model = load_model_for_inference(mid, path)
+        model.load_state_dict(
+            torch.load(path, map_location=common_config.DEVICE)
+        )  # Load specific weights
+        model.to(common_config.DEVICE)
+        models.append(model)
+
+    print('Calculating ensemble TTA predictions for threshold tuning...')
+    all_probs, all_masks = get_tta_predictions(models, val_loader, common_config.DEVICE)
     best_threshold, best_f1 = find_optimal_threshold(all_probs, all_masks)
 
-    print('\n--- Tuning Complete ---')
-    print(f'Model: {args.model}')
-    print(f'Best F1 Score on Validation Set (with TTA): {best_f1:.4f}')
+    print('\n--- Ensemble Tuning Complete ---')
+    print(f'Best F1 Score on Validation Set (with ensemble TTA): {best_f1:.4f}')
     print(f'Optimal Threshold: {best_threshold:.4f}')
 
     results = {'best_threshold': best_threshold, 'validation_f1_tta': best_f1}
     output_filename = os.path.join(
         common_config.MODEL_CHECKPOINT_DIR,
-        f'best_threshold_{args.model}.json',
+        'best_threshold_ensemble.json',
     )
     with open(output_filename, 'w') as f:
         json.dump(results, f, indent=4)
-    print(f'Best threshold saved to: {output_filename}')
+    print(f'Best ensemble threshold saved to: {output_filename}')
 
 
 if __name__ == '__main__':

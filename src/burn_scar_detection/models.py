@@ -71,43 +71,21 @@ class FusionBlock(nn.Module):
         return self.fusion_conv(fused)
 
 
-class SmpSiameseCBAM(nn.Module):
-    """Implementation A Model: Siamese U-Net with SMP backbone and multi-scale CBAM fusion."""
-
+class SmpUnet(nn.Module):
     def __init__(self, n_channels, n_classes):
         super().__init__()
-
         self.model = smp.Unet(
-            encoder_name='efficientnet-b0',
-            encoder_weights='imagenet',
-            in_channels=n_channels,
-            classes=n_classes,
-        )
-        self.encoder = self.model.encoder
-        self.decoder = self.model.decoder
-        self.segmentation_head = self.model.segmentation_head
-
-        self.cbam_blocks = nn.ModuleList(
-            [CBAMBlock(ch) for ch in self.encoder.out_channels]
-        )
-        self.fusion_blocks = nn.ModuleList(
-            [FusionBlock(ch) for ch in self.encoder.out_channels]
+            encoder_name='mit_b4',  # Supported transformer backbone
+            encoder_weights='imagenet',  # Pretrained on ImageNet
+            in_channels=n_channels * 2,  # e.g., 28 for stacked T1 (14 ch) + T2 (14 ch)
+            classes=n_classes,  # 1 for binary burn scars
+            activation='sigmoid',  # For ROC-AUC eval
         )
 
     def forward(self, t1, t2):
-        f1_features = self.encoder(t1)
-        f2_features = self.encoder(t2)
-
-        fused_skip_features = []
-        for i, (f1, f2) in enumerate(zip(f1_features, f2_features)):
-            difference = torch.abs(f1 - f2)
-            attended_difference = self.cbam_blocks[i](difference)
-            fused_output = self.fusion_blocks[i](f1, f2, attended_difference)
-            fused_skip_features.append(fused_output)
-
-        decoder_output = self.decoder(fused_skip_features)
-        masks = self.segmentation_head(decoder_output)
-        return masks
+        # Stack T1 and T2 along the channel dimension for early fusion
+        x = torch.cat([t1, t2], dim=1)  # Shape: (B, 28, 128, 128) assuming 14 ch each
+        return self.model(x)  # Pass stacked input to the model
 
 
 class CustomDoubleConv(nn.Module):
@@ -208,7 +186,7 @@ class SmpUnetPlusPlus(nn.Module):
     def __init__(self, n_channels, n_classes):
         super().__init__()
         self.model = smp.UnetPlusPlus(
-            encoder_name='efficientnet-b0',
+            encoder_name='mit_b3',
             encoder_weights='imagenet',
             in_channels=n_channels,
             classes=n_classes,
@@ -238,7 +216,7 @@ class SmpUnetPlusPlus(nn.Module):
 
 
 MODEL_REGISTRY = {
-    'smp_siamese': SmpSiameseCBAM,
+    'smp_unet': SmpUnet,
     'custom_unet': CustomUNetSiamese,
     'smp_unetpp': SmpUnetPlusPlus,
 }

@@ -1,5 +1,3 @@
-import os
-
 import torch
 import torchvision.transforms.functional as TF
 
@@ -7,11 +5,8 @@ from . import config as common_config
 from .models import get_model
 
 
-def load_model_for_inference(model_id: str):
+def load_model_for_inference(model_id: str, model_path: str):
     """Initializes a model and loads its weights from a checkpoint file."""
-    model_path = os.path.join(
-        common_config.MODEL_CHECKPOINT_DIR, f'best_model_{model_id}.pth'
-    )
     print(f'Loading model: {model_path}')
 
     model = get_model(
